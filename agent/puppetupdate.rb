@@ -61,6 +61,7 @@ module MCollective
       def strip_ignored_branches(branch_list)
         branch_list.reject do |branch|
           branch == '(no branch)' or
+          branch =~ /detached from/ or
           ignore_branches.select { |b| b.match(branch) }.count > 0
         end
       end
@@ -89,7 +90,7 @@ module MCollective
           remove_branches.select { |b| b.match(branch) }.count > 0
         end.map{|b| branch_dir(b)}
         (env_branches - keep).each do |branch|
-          run "rm -rf #{env_dir}/#{branch}"
+          run "rm -rf '#{env_dir}/#{branch}'"
         end
       end
 
