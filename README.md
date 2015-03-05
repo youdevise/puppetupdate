@@ -75,6 +75,13 @@ is called (unless you name your default git branch 'production')
 If any of the entries are bracketed by //, then the value is assumed
 to be a regular expression.
 
+Matching happens against dir names as well as branch names so be sure that
+translation doesn't bite you. For example setting:
+
+  some/thing
+
+will match branch `some/thing` but not the folder some__thing.
+
 For example, the setting:
 
   production,/^foobar/

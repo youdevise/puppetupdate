@@ -57,52 +57,57 @@ module MCollective
       def update_single_branch(branch, revision = '')
         whilst_locked do
           update_bare_repo
-          ret = update_branch(branch, revision)
-          cleanup_old_branches
-          ret
+          drop_bad_dirs
+          update_branch(branch, revision)
         end
       end
 
-      def strip_ignored_branches(branch_list)
-        branch_list.reject do |branch|
-          branch == '(no branch)' or
-          branch =~ /detached from/ or
-          ignore_branches.select { |b| b.match(branch) }.count > 0
+      # all actual branches in repo; this method is cached
+      def branches_in_repo
+        %x[cd #{git_dir} && git branch -a].lines.
+          map {|l| l.gsub(/^\s*\*/, '').strip}.
+          reject {|b| b =~ /no branch/ || b =~ /detached from/}
+      end
+
+      # we want to sync branches that are not ignored and are
+      # not going to be removed
+      def branches_in_repo_to_sync
+        branches_in_repo.reject do |branch|
+          remove_branches.any? { |r| r.match(branch) } or
+          ignore_branches.any? { |r| r.match(branch) }
         end
       end
 
-      def git_branches
-        strip_ignored_branches `cd #{git_dir} && git branch -a`.lines.
-          map { |l| l.gsub(/\*/, '').strip }
+      def dirs_in_env_dir
+        Dir.entries(env_dir).reject {|e| ['.', '..'].include? e}
       end
 
-      def env_branches
-        strip_ignored_branches `ls -1 #{env_dir}`.lines.map(&:strip)
+      # we want to remove dirs that are not corresponding to branches
+      # kept in sync and not those that should be ignored
+      def dirs_in_env_dir_to_drop
+        (dirs_in_env_dir - branches_in_repo_to_sync.map {|b| branch_dir b}).
+          reject { |branch| ignore_branches.any? { |r| r.match(branch) } }
       end
 
       def update_all_branches
         whilst_locked do
           update_bare_repo
-          git_branches.reject do |branch|
-            remove_branches.select { |b| b.match(branch) }.count > 0
-          end.each {|branch| update_branch(branch) }
-          cleanup_old_branches
+          drop_bad_dirs
+          sync_branches
         end
       end
 
-      def cleanup_old_branches(config = nil)
-        return if config && config !~ /yes|1|true/
-
-        keep = git_branches.reject do |branch|
-          remove_branches.select { |b| b.match(branch) }.count > 0
-        end.map { |b| branch_dir(b) }
-        (env_branches - keep).each do |branch|
-          run "rm -rf '#{env_dir}/#{branch}'"
-        end
+      def drop_bad_dirs
+        dirs_in_env_dir_to_drop.each {|branch| run "rm -rf '#{env_dir}/#{branch}'" }
       end
 
-      def update_branch(branch, revision = '')
-        return unless git_branches.include? branch
+      def sync_branches
+        branches_in_repo_to_sync.each {|branch| update_branch(branch) }
+      end
+
+      # only updates branch if it has to be kept in sync
+      def update_branch(branch, revision='')
+        return unless branches_in_repo_to_sync.include?(branch)
 
         branch_path = "#{env_dir}/#{branch_dir(branch)}/"
         Dir.mkdir(env_dir) unless File.exist?(env_dir)
