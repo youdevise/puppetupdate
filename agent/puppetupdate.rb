@@ -68,6 +68,7 @@ module MCollective
       # only updates branch if it has to be kept in sync
       def update_branch(branch, revision='')
         return unless branches_in_repo_to_sync.include?(branch)
+        Log.info "updating #{branch}"
 
         branch_path = "#{env_dir}/#{branch_dir(branch)}/"
         Dir.mkdir(env_dir) unless File.exist?(env_dir)
@@ -76,6 +77,7 @@ module MCollective
         ret = git_reset(revision.length > 0 ? revision : branch, branch_path)
         if run_after_checkout
           Dir.chdir(branch_path) { ret[:after_checkout] = system run_after_checkout }
+          Log.info "  after checkout is #{ret[:after_checkout]}"
         end
         ret
       end
@@ -83,15 +85,20 @@ module MCollective
       def update_bare_repo
         git_auth do
           if File.exists?(git_dir)
+            Log.info "fetching #{git_dir}"
             run "(cd #{git_dir}; git fetch origin; git remote prune origin)"
           else
+            Log.info "cloning #{@repo_url} into #{git_dir}"
             run "git clone --mirror #{@repo_url} #{git_dir}"
           end
         end
       end
 
       def drop_bad_dirs
-        dirs_in_env_dir_to_drop.each {|branch| run "rm -rf '#{env_dir}/#{branch}'" }
+        dirs_in_env_dir_to_drop.each do |dir|
+          Log.info "removing #{dir}"
+          run "rm -rf '#{env_dir}/#{dir}'"
+        end
       end
 
       # all actual branches in repo; this method is cached
