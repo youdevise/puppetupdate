@@ -1,7 +1,6 @@
 #! /usr/bin/env ruby -S rspec
 $: << '.'
 require 'singleton'
-require 'mcollective'
 require 'mcollective/logger'
 require 'mcollective/log'
 require 'mcollective/config'
@@ -44,7 +43,7 @@ describe MCollective::Agent::Puppetupdate do
         echo 'hi' > file3
         git add file3
         git commit -am"must_be_hidden";
-        git push origin must_be_hidden) >/dev/null
+        git push -q origin must_be_hidden) >/dev/null
     SHELL
 
     agent.dir      = Dir.mktmpdir
@@ -55,11 +54,14 @@ describe MCollective::Agent::Puppetupdate do
     clean
     clone_main
     clone_bare
+    Dir.mkdir(agent.env_dir)
+
     agent.update_all_branches
   end
 
-  it "#strip_ignored_branches works" do
-    agent.strip_ignored_branches(%w(foo bar leave_me_alone)).should == %w(foo bar)
+  it "#branches_in_repo_to_sync works" do
+    agent.stubs(:branches_in_repo => ['foo', 'bar', 'leave_me_alone'])
+    agent.branches_in_repo_to_sync.should == ['foo', 'bar']
   end
 
   it "#git_dir should depend on config" do
@@ -68,11 +70,12 @@ describe MCollective::Agent::Puppetupdate do
   end
 
   it "#branch_dir is not using reserved branch" do
-    agent.branch_dir('foobar').should == 'foobar'
-    agent.branch_dir('master').should == 'masterbranch'
-    agent.branch_dir('user').should   == 'userbranch'
-    agent.branch_dir('agent').should  == 'agentbranch'
-    agent.branch_dir('main').should   == 'mainbranch'
+    agent.branch_dir('fo/bar').should eq('fo__bar')
+    agent.branch_dir('foobar').should eq('foobar')
+    agent.branch_dir('master').should eq('masterbranch')
+    agent.branch_dir('user').should   eq('userbranch')
+    agent.branch_dir('agent').should  eq('agentbranch')
+    agent.branch_dir('main').should   eq('mainbranch')
   end
 
   describe "#update_bare_repo" do
@@ -81,34 +84,34 @@ describe MCollective::Agent::Puppetupdate do
     it "clones fresh repository" do
       agent.update_bare_repo
       File.directory?(agent.git_dir).should be true
-      agent.git_branches.size.should be > 1
+      agent.branches_in_repo.size.should be > 1
     end
 
     it "fetches repository when present" do
       clone_bare
       agent.update_bare_repo
       File.directory?(agent.git_dir).should be true
-      agent.git_branches.size.should be > 1
+      agent.branches_in_repo.size.should be > 1
     end
   end
 
-  it '#cleanup_old_branches removes branches no longer in repo' do
+  it '#drop_bad_dirs removes branches no longer in repo' do
     `mkdir -p #{agent.env_dir}/hahah`
-    agent.cleanup_old_branches
+    agent.drop_bad_dirs
     File.exist?("#{agent.env_dir}/hahah").should == false
     File.exist?("#{agent.env_dir}/masterbranch").should == true
   end
 
-  it '#cleanup_old_branches does not remove ignored branches' do
+  it '#drop_bad_dirs does not remove ignored branches' do
     `mkdir -p #{agent.env_dir}/leave_me_alone`
-    agent.cleanup_old_branches
+    agent.drop_bad_dirs
     File.exist?("#{agent.env_dir}/leave_me_alone").should == true
   end
 
-  it '#cleanup_old_branches does cleanup removed branches' do
+  it '#drop_bad_dirs does cleanup removed branches' do
     File.exist?("#{agent.env_dir}/must_be_hidden").should == false
     `mkdir -p #{agent.env_dir}/must_be_hidden`
-    agent.cleanup_old_branches
+    agent.drop_bad_dirs
     File.exist?("#{agent.env_dir}/must_be_hidden").should == false
   end
 
@@ -119,25 +122,11 @@ describe MCollective::Agent::Puppetupdate do
     File.exist?("#{agent.env_dir}/masterbranch/puppet.conf.base").should == false
   end
 
-  describe '#cleanup_old_branches' do
+  describe '#drop_bad_dirs' do
     it 'cleans up by default' do
       agent.expects(:run)
       `mkdir -p #{agent.env_dir}/hahah`
-      agent.cleanup_old_branches
-    end
-
-    it 'cleans up with yes/1/true' do
-      %w(yes 1 true).each do |value|
-        agent.expects(:run)
-        `mkdir -p #{agent.env_dir}/hahah`
-        agent.cleanup_old_branches(value)
-      end
-    end
-
-    it 'does not cleanup otherwise' do
-      agent.expects(:run).never
-      `mkdir -p #{agent.env_dir}/hahah`
-      agent.cleanup_old_branches('no')
+      agent.drop_bad_dirs
     end
   end
 
@@ -146,15 +135,15 @@ describe MCollective::Agent::Puppetupdate do
       new_branch 'testing_del_branch'
       agent.update_bare_repo
       agent.update_branch 'testing_del_branch'
-      agent.env_branches.include?('testing_del_branch').should == true
+      agent.dirs_in_env_dir.include?('testing_del_branch').should == true
 
       del_branch 'testing_del_branch'
       agent.update_bare_repo
-      agent.env_branches.include?('testing_del_branch').should == true
+      agent.dirs_in_env_dir.include?('testing_del_branch').should == true
 
       agent.update_branch 'testing_del_branch'
-      agent.cleanup_old_branches
-      agent.env_branches.include?('testing_del_branch').should == false
+      agent.drop_bad_dirs
+      agent.dirs_in_env_dir.include?('testing_del_branch').should == false
     end
   end
 
@@ -174,11 +163,11 @@ describe MCollective::Agent::Puppetupdate do
   end
 
   def clone_main
-    `git clone #{agent.repo_url} #{agent.dir}`
+    `git clone -q #{agent.repo_url} #{agent.dir}`
   end
 
   def clone_bare
-    `git clone --mirror #{agent.repo_url} #{agent.git_dir}`
+    `git clone -q --mirror #{agent.repo_url} #{agent.git_dir}`
   end
 
   def new_branch(name)

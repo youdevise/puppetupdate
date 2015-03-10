@@ -3,6 +3,20 @@ require 'fileutils'
 module MCollective
   module Agent
     class Puppetupdate < RPC::Agent
+      attr_accessor :dir, :repo_url, :ignore_branches, :run_after_checkout, :remove_branches
+
+      def initialize
+        @dir                = config('directory', '/etc/puppet')
+        @repo_url           = config('repository', 'http://git/puppet')
+        @ignore_branches    = config('ignore_branches', '').split(',').map { |i| regexy_string(i) }
+        @remove_branches    = config('remove_branches', '').split(',').map { |r| regexy_string(r) }
+        @run_after_checkout = config('run_after_checkout', nil)
+        super
+      end
+
+      def git_dir; config('clone_at', "#{@dir}/puppet.git"); end
+      def env_dir; "#{@dir}/environments"; end
+
       action "update_all" do
         begin
           update_all_branches
@@ -32,77 +46,29 @@ module MCollective
       end
 
       action "git_gc" do
-        git_gc
-      end
-
-      attr_accessor :dir, :repo_url, :ignore_branches, :run_after_checkout, :remove_branches
-
-      def initialize
-        @dir                = config('directory', '/etc/puppet')
-        @repo_url           = config('repository', 'http://git/puppet')
-        @ignore_branches    = config('ignore_branches', '').split(',').map { |i| regexy_string(i) }
-        @remove_branches    = config('remove_branches', '').split(',').map { |r| regexy_string(r) }
-        @run_after_checkout = config('run_after_checkout', nil)
-        super
-      end
-
-      def git_dir
-        config('clone_at', "#{@dir}/puppet.git")
-      end
-
-      def env_dir
-        "#{@dir}/environments"
-      end
-
-      def update_single_branch(branch, revision = '')
-        whilst_locked do
-          update_bare_repo
-          ret = update_branch(branch, revision)
-          cleanup_old_branches
-          ret
-        end
-      end
-
-      def strip_ignored_branches(branch_list)
-        branch_list.reject do |branch|
-          branch == '(no branch)' ||
-            branch =~ /detached from/ ||
-            ignore_branches.select { |b| b.match(branch) }.count > 0
-        end
-      end
-
-      def git_branches
-        strip_ignored_branches `cd #{git_dir} && git branch -a`.lines.
-          map { |l| l.gsub(/\*/, '').strip }
-      end
-
-      def env_branches
-        strip_ignored_branches `ls -1 #{env_dir}`.lines.map(&:strip)
+        run "git --git-dir=#{git_dir} gc --auto --prune"
       end
 
       def update_all_branches
         whilst_locked do
           update_bare_repo
-          git_branches.reject do |branch|
-            remove_branches.select { |b| b.match(branch) }.count > 0
-          end.each {|branch| update_branch(branch) }
-          cleanup_old_branches
+          drop_bad_dirs
+          branches_in_repo_to_sync.each {|branch| update_branch(branch) }
         end
       end
 
-      def cleanup_old_branches(config = nil)
-        return if config && config !~ /yes|1|true/
-
-        keep = git_branches.reject do |branch|
-          remove_branches.select { |b| b.match(branch) }.count > 0
-        end.map { |b| branch_dir(b) }
-        (env_branches - keep).each do |branch|
-          run "rm -rf '#{env_dir}/#{branch}'"
+      def update_single_branch(branch, revision='')
+        whilst_locked do
+          update_bare_repo
+          drop_bad_dirs
+          update_branch(branch, revision)
         end
       end
 
-      def update_branch(branch, revision = '')
-        return unless git_branches.include? branch
+      # only updates branch if it has to be kept in sync
+      def update_branch(branch, revision='')
+        return unless branches_in_repo_to_sync.include?(branch)
+        Log.info "updating #{branch}"
 
         branch_path = "#{env_dir}/#{branch_dir(branch)}/"
         Dir.mkdir(env_dir) unless File.exist?(env_dir)
@@ -111,8 +77,55 @@ module MCollective
         ret = git_reset(revision.length > 0 ? revision : branch, branch_path)
         if run_after_checkout
           Dir.chdir(branch_path) { ret[:after_checkout] = system run_after_checkout }
+          Log.info "  after checkout is #{ret[:after_checkout]}"
         end
         ret
+      end
+
+      def update_bare_repo
+        git_auth do
+          if File.exists?(git_dir)
+            Log.info "fetching #{git_dir}"
+            run "(cd #{git_dir}; git fetch origin; git remote prune origin)"
+          else
+            Log.info "cloning #{@repo_url} into #{git_dir}"
+            run "git clone --mirror #{@repo_url} #{git_dir}"
+          end
+        end
+      end
+
+      def drop_bad_dirs
+        dirs_in_env_dir_to_drop.each do |dir|
+          Log.info "removing #{dir}"
+          run "rm -rf '#{env_dir}/#{dir}'"
+        end
+      end
+
+      # all actual branches in repo; this method is cached
+      def branches_in_repo
+        %x[cd #{git_dir} && git branch -a].lines.
+          map {|l| l.gsub(/^\s*\*/, '').strip}.
+          reject {|b| b =~ /no branch/ || b =~ /detached from/}
+      end
+
+      # we want to sync branches that are not ignored and are
+      # not going to be removed
+      def branches_in_repo_to_sync
+        branches_in_repo.reject do |branch|
+          remove_branches.any? { |r| r.match(branch) } or
+          ignore_branches.any? { |r| r.match(branch) }
+        end
+      end
+
+      def dirs_in_env_dir
+        Dir.entries(env_dir).reject {|e| ['.', '..'].include? e}
+      end
+
+      # we want to remove dirs that are not corresponding to branches
+      # kept in sync and not those that should be ignored
+      def dirs_in_env_dir_to_drop
+        (dirs_in_env_dir - branches_in_repo_to_sync.map {|b| branch_dir b}).
+          reject { |branch| ignore_branches.any? { |r| r.match(branch) } }
       end
 
       def git_reset(revision, work_tree)
@@ -128,20 +141,6 @@ module MCollective
         branch = branch.gsub /\//, '__'
         branch = branch.gsub /-/, '_'
         %w(master user agent main).include?(branch) ? "#{branch}branch" : branch
-      end
-
-      def update_bare_repo
-        git_auth do
-          if File.exist?(git_dir)
-            run "(cd #{git_dir}; git fetch origin; git remote prune origin)"
-          else
-            run "git clone --mirror #{@repo_url} #{git_dir}"
-          end
-        end
-      end
-
-      def git_gc
-        run "git --git-dir=#{git_dir} gc --auto --prune"
       end
 
       def git_auth

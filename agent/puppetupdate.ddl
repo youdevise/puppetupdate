@@ -28,8 +28,8 @@ action "update", :description => "Update the branch to a specific revision" do
     :maxlength   => 255
 
   input :cleanup,
-    :description => "cleanup old branches",
-    :display_as  => "cleanup old branches after updating",
+    :description => "cleanup old branches [deprecated]",
+    :display_as  => "cleanup old branches after updating [deprecated]",
     :optional    => true,
     :type        => :string,
     :prompt      => "Cleanup (yes/no)",
